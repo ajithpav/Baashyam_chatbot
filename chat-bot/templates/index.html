@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Droidal ChatBot</title>
+    <title>Baashyam ChatBot</title>
     <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='chatbot-ui.css') }}">
     <style>
         /* Apply background image to the entire page */
@@ -14,9 +14,9 @@
             background-color: #e5e5e5;
             display: flex;
             justify-content: center;
-            height: 1290vh;
+            height: 800vh;
             width: 100%;
-            background: url('{{ url_for('static', filename='images/baasyamfull.png') }}') no-repeat center center;
+            background: url('{{ url_for('static', filename='images/baashyamfull.png') }}') no-repeat center center;
             background-size: cover;
         }
     </style>
@@ -31,7 +31,7 @@
     <!-- Chatbot UI (hidden by default) -->
     <div id="chatbot-ui" class="hidden">
         <div class="chat-header">
-            <h3>Droidal</h3>
+            <h3>Baashyaam</h3>
             <button onclick="toggleChatbot()">X</button> <!-- Close button -->
         </div>
         <div class="chat-area" id="chat-area"></div> <!-- Assign an ID to the chat area for easy access -->
@@ -46,8 +46,8 @@
         // Initialize the chatbot with the Flask backend URL
         createChatBot(
             host = 'http://localhost:5005/chat',  // Your Flask server endpoint
-            title = "Droidal Chatbot",
-            welcomeMessage = "Welcome to Droidal!",
+            title = "Baashyaam Chatbot",
+            welcomeMessage = "Welcome to Baashyam!",
             inactiveMsg = "Sorry, I didn't understand that. Please try again."
         );
 
@@ -84,8 +84,6 @@
                     </div>
                 </div>
                 <div id="button-container" class="chat-buttons">
-                    // <button class="chat-button" onclick="handleButtonClick('Build AI chatbot')">🔨 Build AI Chatbot</button>
-                    // <button class="chat-button" onclick="handleButtonClick('Free trial')">⚡ Free Trial</button>
                     <button class="chat-button" onclick="handleButtonClick('Pricing')">💲 Pricing</button>
                     <button class="chat-button" onclick="handleButtonClick('Contact Sales')">📞 Contact Sales</button>
                     <button class="chat-button" onclick="handleButtonClick('About Baashyam')">🔎 About Baashyam</button>
