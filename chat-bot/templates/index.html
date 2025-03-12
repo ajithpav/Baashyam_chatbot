@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Droidal ChatBot</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='chatbot-ui.css') }}">
+    <style>
+        /* Apply background image to the entire page */
+        body {
+            overflow-y: auto;
+            overflow-x: hidden;
+            font-family: Arial, Helvetica, sans-serif;
+            background-color: #e5e5e5;
+            display: flex;
+            justify-content: center;
+            height: 1290vh;
+            width: 100%;
+            background: url('{{ url_for('static', filename='images/baasyamfull.png') }}') no-repeat center center;
+            background-size: cover;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Chatbot icon on the bottom-right -->
+    <div id="chatbot-icon" onclick="toggleChatbot()">
+        <img src="{{ url_for('static', filename='images/baashyam.png') }}" alt="Chatbot Icon">
+    </div>
+
+    <!-- Chatbot UI (hidden by default) -->
+    <div id="chatbot-ui" class="hidden">
+        <div class="chat-header">
+            <h3>Droidal</h3>
+            <button onclick="toggleChatbot()">X</button> <!-- Close button -->
+        </div>
+        <div class="chat-area" id="chat-area"></div> <!-- Assign an ID to the chat area for easy access -->
+        <div class="chat-input-area">
+            <input type="text" class="chat-input" placeholder="Type your message...">
+            <button class="chat-submit">Send</button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='chatbot-ui.js') }}"></script>
+    <script>
+        // Initialize the chatbot with the Flask backend URL
+        createChatBot(
+            host = 'http://localhost:5005/chat',  // Your Flask server endpoint
+            title = "Droidal Chatbot",
+            welcomeMessage = "Welcome to Droidal!",
+            inactiveMsg = "Sorry, I didn't understand that. Please try again."
+        );
+
+        // Function to toggle chatbot visibility
+        function toggleChatbot() {
+            var chatbot = document.getElementById('chatbot-ui');
+            var chatbotIcon = document.getElementById('chatbot-icon');
+
+            chatbot.classList.toggle('show');
+            chatbotIcon.classList.toggle('hide');
+        }
+
+        // This function will dynamically add the message and buttons to the chat area on page load
+        function createChatBot(host, title, welcomeMessage, inactiveMsg) {
+            // A dictionary of specific questions and responses
+            const predefinedResponses = {
+                "About Baashyam": "Baashyaam Group, established over three decades ago, is a prominent real estate developer based in Chennai, Tamil Nadu. The company has a diverse portfolio that includes affordable housing, independent villas, premium living spaces, luxury residences, townships, and commercial buildings. Baashyaam is recognized for its commitment to quality, transparency, and timely project delivery.",
+                "Recent Developments?": " Baashyaam Constructions has become an associate sponsor for the Chennai Super Kings (CSK), reflecting its strong ties to the community and enhancing brand visibility.",
+                "Baashyaam Group's leadership comprises?": "Radhakrishnan Yuvaraajann: Director of Baashyaam Constructions Private Limited.Abinesh Yuvaraj: Director of Baashyaam Constructions Private Limited,Bashyam Yuvarajan: Director of Baashyaam Constructions Private Limited",
+                // Add more predefined responses here
+            };
+
+            // Check if the query is in predefined responses
+            function checkForPredefinedResponse(query) {
+                return predefinedResponses[query] || null;
+            }
+
+            // Set initial welcome message
+            document.getElementById('chat-area').innerHTML = `
+                <div id="welcome-msg" class="bot-msg">
+                    <div class="msg">
+                        Hi, it's great to see you again! 👋 <br/>
+                        What information are you looking for? Please use the navigation below or ask me anything about Baashyam.
+                    </div>
+                </div>
+                <div id="button-container" class="chat-buttons">
+                    // <button class="chat-button" onclick="handleButtonClick('Build AI chatbot')">🔨 Build AI Chatbot</button>
+                    // <button class="chat-button" onclick="handleButtonClick('Free trial')">⚡ Free Trial</button>
+                    <button class="chat-button" onclick="handleButtonClick('Pricing')">💲 Pricing</button>
+                    <button class="chat-button" onclick="handleButtonClick('Contact Sales')">📞 Contact Sales</button>
+                    <button class="chat-button" onclick="handleButtonClick('About Baashyam')">🔎 About Baashyam</button>
+                    <button class="chat-button" onclick="handleButtonClick('Contact us')">📧 Contact Us</button>
+                </div>
+            `;
+
+            // Add listener for chat input submit via "Send" button
+            document.querySelector('.chat-submit').addEventListener('click', function() {
+                sendMessage();
+            });
+
+            // Add listener for "Enter" key to send the message
+            document.querySelector('.chat-input').addEventListener('keydown', function(event) {
+                if (event.key === "Enter") {
+                    event.preventDefault(); // Prevent the default form submit
+                    sendMessage();
+                }
+            });
+
+            // Function to hide the welcome message and buttons
+            function hideWelcomeMessageAndButtons() {
+                const welcomeMsg = document.getElementById('welcome-msg');
+                const buttonContainer = document.getElementById('button-container');
+                
+                if (welcomeMsg) welcomeMsg.style.display = 'none';
+                if (buttonContainer) buttonContainer.style.display = 'none';
+            }
+
+            // Function to clean and return the last complete sentence
+            // Function to clean and return the last complete sentence
+function cleanGeneratedResponse(text) {
+    let lastCompleteSentence = text.match(/[^.!?]*[.!?]/g);  // Matches the last complete sentence
+    return lastCompleteSentence ? lastCompleteSentence[lastCompleteSentence.length - 1] : text;
+}
+
+// Function to check if the response is incomplete
+function isIncompleteResponse(responseText) {
+    const incompletePatterns = [
+        "the following:", 
+        "as discussed earlier", 
+        "continue with the next step", 
+        "for more details", 
+        "is"  // Add more incomplete patterns as needed
+    ];
+    return incompletePatterns.some(pattern => responseText.toLowerCase().endsWith(pattern.toLowerCase()));
+}
+
+// Function to check if the response is unrelated or irrelevant
+function isUnrelatedResponse(responseText) {
+    const unrelatedPatterns = [
+        "glycolic acid", // This is unrelated to Droidal's domain
+        "serum",         // Any unwanted keywords
+        "skincare",      // Add more unrelated terms here
+        "acne",
+        "code",
+        "how are you",
+        "give"
+    ];
+    return unrelatedPatterns.some(pattern => responseText.toLowerCase().includes(pattern.toLowerCase()));
+}
+
+// Function to send the message to the bot
+function sendMessage() {
+    let userMessage = document.querySelector('.chat-input').value;
+
+    if (userMessage.trim()) {
+        // Hide welcome message and buttons when user interacts
+        hideWelcomeMessageAndButtons();
+
+        appendUserMessage(userMessage);
+        document.querySelector('.chat-input').value = '';
+
+        // Check if the user's input matches any predefined response
+        let predefinedResponse = checkForPredefinedResponse(userMessage);
+        if (predefinedResponse) {
+            appendBotMessage(predefinedResponse);
+        } else {
+            // Check if the user's input is unwanted or irrelevant
+            if (isUnwantedQuery(userMessage)) {
+                appendBotMessage("My AI knowledge is only focused on Baashyam product. Please ask relative question about our product.");
+            } else {
+                // Send message to the backend if it's valid
+                fetch(host, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ message: userMessage })
+                })
+                .then(response => response.json())  // Get the JSON response
+                .then(data => {
+                    // Clean the response before appending it
+                    let cleanedResponse = cleanGeneratedResponse(data.response);
+
+                    // Check if the response is incomplete or unrelated
+                    if (isIncompleteResponse(cleanedResponse)) {
+                        appendBotMessage(cleanedResponse + " Would you like more information about this topic?");
+                    } else if (isUnrelatedResponse(cleanedResponse)) {
+                        appendBotMessage("Sorry, the response seems unrelated. Please ask something about Baashyam Group.");
+                    } else {
+                        appendBotMessage(cleanedResponse);  // Append the valid response
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    appendBotMessage("Sorry, I couldn't process your request. Please try again.");
+                });
+            }
+        }
+    }
+}
+
+
+            // Function to append user messages
+            function appendUserMessage(message) {
+                const chatArea = document.getElementById('chat-area');
+                let userMsgDiv = document.createElement('div');
+                userMsgDiv.classList.add('user-msg');
+                userMsgDiv.innerHTML = `<div class="msg">${message}</div>`;
+                chatArea.appendChild(userMsgDiv);
+                chatArea.scrollTop = chatArea.scrollHeight;
+            }
+
+            // Function to append bot messages
+            function appendBotMessage(message) {
+                const chatArea = document.getElementById('chat-area');
+                let botMsgDiv = document.createElement('div');
+                botMsgDiv.classList.add('bot-msg');
+                botMsgDiv.innerHTML = `<div class="msg">${message}</div>`;
+                chatArea.appendChild(botMsgDiv);
+                chatArea.scrollTop = chatArea.scrollHeight;
+            }
+
+            // Function to handle button click events
+            function handleButtonClick(message) {
+                // Hide welcome message and buttons when a button is clicked
+                hideWelcomeMessageAndButtons();
+
+                const userMessage = `<div class="user-msg"><div class="msg">${message}</div></div>`;
+                document.querySelector('.chat-area').innerHTML += userMessage;
+                // Send the button click message to your backend for processing
+                fetch(host, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ message: message })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    const botMessage = `<div class="bot-msg"><div class="msg">${data.response}</div></div>`;
+                    document.querySelector('.chat-area').innerHTML += botMessage;
+                })
+                .catch(error => console.error('Error:', error));
+            }
+
+            // Check for unwanted query
+            function isUnwantedQuery(query) {
+                // Define patterns or keywords that you consider unwanted
+                const unwantedPatterns = [
+                    "who is the president", 
+                    "tell me about your competitors",
+                    "something irrelevant"
+                ];
+
+                return unwantedPatterns.some(pattern => query.toLowerCase().includes(pattern));
+            }
+        }
+    </script>
+
+</body>
+</html>
