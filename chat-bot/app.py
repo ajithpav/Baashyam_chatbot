@@ -83,6 +83,7 @@ prompt_templates = {
     "service_info": "Explain the {service} service offered by Bashyam Group.",
     "product_info": "Describe the {product} product from Bashyam Group.",
     "project_info": "Give details about Bashyam Group's {project} project.",
+    "customer_info": "Provide details about customer {customer_id}.",
     "irrelevant": "The query is not directly related to Bashyam Group. Provide a polite response directing to relevant information."
 }
 
@@ -138,7 +139,7 @@ class DataProcessor:
             return False, f"Error processing PDF: {str(e)}"
     
     def process_excel(self, excel_path):
-        """Extract data from Excel/CSV file"""
+        """Extract data from Excel/CSV file with improved customer data handling"""
         try:
             # Read the file (works for both CSV and Excel)
             if excel_path.endswith('.csv'):
@@ -146,8 +147,12 @@ class DataProcessor:
             else:
                 df = pd.read_excel(excel_path)
             
+            # Display column names for debugging
+            print(f"CSV columns found: {df.columns.tolist()}")
+            
             # Extract Q&A pairs if columns match expected format
             qa_added = False
+            entity_added = False
             
             # Check for question-answer columns
             if 'question' in df.columns and 'answer' in df.columns:
@@ -157,7 +162,6 @@ class DataProcessor:
                         qa_added = True
             
             # Check for entity information (like products, services, etc.)
-            entity_added = False
             if 'entity_type' in df.columns and 'entity_name' in df.columns and 'description' in df.columns:
                 for _, row in df.iterrows():
                     if not pd.isna(row['entity_type']) and not pd.isna(row['entity_name']) and not pd.isna(row['description']):
@@ -167,6 +171,97 @@ class DataProcessor:
                         
                         self.training_data["entities"][entity_type][row['entity_name']] = row['description']
                         entity_added = True
+            
+            # Handle customer data specifically - try to identify relevant columns
+            customer_id_col = None
+            customer_name_col = None
+            due_date_col = None
+            total_interest_col = None
+            
+            # Try to identify columns by common names
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if any(term in col_lower for term in ['id', 'cust id', 'customerid', 'customer_id']):
+                    customer_id_col = col
+                elif any(term in col_lower for term in ['name', 'customer name', 'customername']):
+                    customer_name_col = col
+                elif any(term in col_lower for term in ['due date', 'duedate']):
+                    due_date_col = col
+                elif any(term in col_lower for term in ['interest', 'total interest']):
+                    total_interest_col = col
+            
+            # If customer ID column is found, process customer data
+            if customer_id_col:
+                # Initialize customer entity type if not exists
+                if "customer" not in self.training_data["entities"]:
+                    self.training_data["entities"]["customer"] = {}
+                
+                # Process each row
+                for _, row in df.iterrows():
+                    # Ensure customer ID is treated as string
+                    cust_id = str(row[customer_id_col]) if not pd.isna(row[customer_id_col]) else None
+                    
+                    if cust_id:
+                        # Create description based on available data
+                        details = []
+                        
+                        if customer_name_col and not pd.isna(row[customer_name_col]):
+                            details.append(f"Name: {row[customer_name_col]}")
+                        
+                        if due_date_col and not pd.isna(row[due_date_col]):
+                            details.append(f"Due Date: {row[due_date_col]}")
+                        
+                        if total_interest_col and not pd.isna(row[total_interest_col]):
+                            details.append(f"Total Interest: {row[total_interest_col]}")
+                        
+                        # Add any other columns as details
+                        for col in df.columns:
+                            if col not in [customer_id_col, customer_name_col, due_date_col, total_interest_col] and not pd.isna(row[col]):
+                                details.append(f"{col}: {row[col]}")
+                        
+                        # Create description
+                        description = f"Customer ID: {cust_id}. " + ". ".join(details)
+                        
+                        # Add to entities
+                        self.training_data["entities"]["customer"][cust_id] = description
+                        
+                        # Also add explicit QA pairs for common questions about this customer
+                        if customer_name_col and not pd.isna(row[customer_name_col]):
+                            name = row[customer_name_col]
+                            self.add_qa_pair(f"What is the customer name for {cust_id}?", 
+                                            f"The customer name for {cust_id} is {name}.")
+                            self.add_qa_pair(f"{cust_id} customer name", 
+                                            f"The customer name for {cust_id} is {name}.")
+                            self.add_qa_pair(f"Who is {cust_id}?", 
+                                            f"{cust_id} refers to customer {name}.")
+                        
+                        if due_date_col and not pd.isna(row[due_date_col]):
+                            due_date = row[due_date_col]
+                            self.add_qa_pair(f"What is the due date for {cust_id}?", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                            self.add_qa_pair(f"{cust_id} due date", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                            self.add_qa_pair(f"When is {cust_id} due?", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                        
+                        if total_interest_col and not pd.isna(row[total_interest_col]):
+                            interest = row[total_interest_col]
+                            self.add_qa_pair(f"What is the total interest for {cust_id}?", 
+                                            f"The total interest for customer {cust_id} is {interest}.")
+                            self.add_qa_pair(f"{cust_id} total interest", 
+                                            f"The total interest for customer {cust_id} is {interest}.")
+                
+                # Add general questions about total interest across all customers
+                if total_interest_col:
+                    total_interest_sum = df[total_interest_col].sum() if pd.api.types.is_numeric_dtype(df[total_interest_col]) else "not calculable"
+                    self.add_qa_pair("What is the total interest calculated?", 
+                                    f"The total interest calculated across all customers is {total_interest_sum}.")
+                    self.add_qa_pair("Show me the total interest", 
+                                    f"The total interest calculated across all customers is {total_interest_sum}.")
+                    self.add_qa_pair("Sum of all interest", 
+                                    f"The sum of all interest payments is {total_interest_sum}.")
+                
+                entity_added = True
             
             # Save any changes
             if qa_added or entity_added:
@@ -184,6 +279,7 @@ class DataProcessor:
             
             return True, f"Successfully processed {excel_path}"
         except Exception as e:
+            print(f"Error processing Excel/CSV: {str(e)}")
             return False, f"Error processing Excel/CSV: {str(e)}"
     
     def _clean_text(self, text):
@@ -284,6 +380,11 @@ class TextProcessor:
         """Determine the type of query to select appropriate template"""
         query_lower = query.lower()
         
+        # Check for customer ID pattern
+        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        if customer_id_match or any(term in query_lower for term in ['customer', 'cust', 'client', 'cros']):
+            return "customer_info"
+        
         # Check for contact related queries
         if any(word in query_lower for word in ['contact', 'email', 'phone', 'call', 'reach']):
             return "contact"
@@ -300,6 +401,10 @@ class TextProcessor:
         if any(word in query_lower for word in ['project', 'work', 'portfolio', 'client', 'case study']):
             return "project_info"
             
+        # Check for interest-related queries
+        if any(word in query_lower for word in ['interest', 'due', 'payment', 'amount']):
+            return "customer_info"
+            
         # Check if it's irrelevant
         if not self.is_relevant_question(query):
             return "irrelevant"
@@ -309,14 +414,50 @@ class TextProcessor:
 
     def search_training_data(self, query):
         """Search for answer in training data"""
+        query_lower = query.lower()
+        
         # Exact match in QA pairs
         for qa_pair in self.data_processor.training_data["qa_pairs"]:
-            if query.lower() == qa_pair["question"].lower():
+            if query_lower == qa_pair["question"].lower():
                 return qa_pair["answer"]
+        
+        # Extract customer ID if present
+        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        customer_id = customer_id_match.group(0) if customer_id_match else None
+        
+        # If query mentions customer ID, look for specific customer entity
+        if customer_id and "customer" in self.data_processor.training_data["entities"]:
+            # Try exact match
+            if customer_id in self.data_processor.training_data["entities"]["customer"]:
+                # Check if asking about specific attribute
+                if 'name' in query_lower or 'who is' in query_lower:
+                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                    name_match = re.search(r'Name: ([^.]+)', customer_info)
+                    if name_match:
+                        return f"The customer name for {customer_id} is {name_match.group(1)}."
+                elif 'due date' in query_lower or 'when' in query_lower:
+                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                    due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
+                    if due_date_match:
+                        return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
+                elif 'interest' in query_lower:
+                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                    interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
+                    if interest_match:
+                        return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
+                else:
+                    # Return full customer info
+                    return self.data_processor.training_data["entities"]["customer"][customer_id]
+        
+        # Check for total interest calculation query
+        if 'total interest' in query_lower or 'interest calculated' in query_lower:
+            for qa_pair in self.data_processor.training_data["qa_pairs"]:
+                if 'total interest calculated' in qa_pair["question"].lower():
+                    return qa_pair["answer"]
         
         # Semantic similarity in QA pairs
         query_embedding = sentence_model.encode([query])
-        best_score = 0.75  # Threshold for semantic similarity
+        best_score = 0.7  # Lowered threshold for better matches
         best_answer = None
         
         for qa_pair in self.data_processor.training_data["qa_pairs"]:
@@ -330,10 +471,10 @@ class TextProcessor:
         if best_answer:
             return best_answer
             
-        # Entity search
+        # General entity search
         for entity_type, entities in self.data_processor.training_data["entities"].items():
             for entity_name, description in entities.items():
-                if entity_name.lower() in query.lower():
+                if entity_name.lower() in query_lower:
                     return f"{entity_name}: {description}"
         
         return None
@@ -383,7 +524,20 @@ class TextProcessor:
         return best_response
     
     def is_relevant_question(self, query):
-        """Determine if a question is relevant to Bashyam Group"""
+        """Determine if a question is relevant to Bashyam Group or customer data"""
+        query_lower = query.lower()
+        
+        # Check for customer ID pattern
+        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        if customer_id_match:
+            return True
+        
+        # Check for customer-related keywords
+        customer_keywords = ["customer", "cust", "client", "cros", "interest", "due date", "payment"]
+        for keyword in customer_keywords:
+            if keyword in query_lower:
+                return True
+        
         # List of company-related keywords
         company_keywords = [
             "bashyam", "baashyam", "group", "company", "services", "products", "location", 
@@ -392,7 +546,6 @@ class TextProcessor:
         ]
         
         # Check if any company keyword is in the query
-        query_lower = query.lower()
         for keyword in company_keywords:
             if keyword in query_lower:
                 return True
@@ -416,7 +569,26 @@ def process_chat_input(text_processor, user_input):
     if not user_input:
         return "How can I help you with information about Bashyam Group today?"
     
-    # Check training data first
+    # Check for customer queries first
+    customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', user_input.lower())
+    if customer_id_match:
+        customer_id = customer_id_match.group(0)
+        
+        # Check if we have data for this customer
+        training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+        else:
+            return f"I don't have specific information about customer {customer_id}. Please provide more details or ask about a different customer."
+    
+    # Check for interest-related queries
+    interest_keywords = ["interest", "total interest", "interest calculated", "interest amount"]
+    if any(keyword in user_input.lower() for keyword in interest_keywords):
+        training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+    
+    # Check training data next
     training_response = text_processor.search_training_data(user_input)
     if training_response:
         return clean_response(training_response)
@@ -455,7 +627,8 @@ def process_chat_input(text_processor, user_input):
         topic=topic,
         service=topic,
         product=topic,
-        project=topic
+        project=topic,
+        customer_id=customer_id_match.group(0) if customer_id_match else "unknown"
     )
     
     # Generate response
@@ -482,6 +655,9 @@ def process_chat_input(text_processor, user_input):
     # If response is too long, summarize it
     if len(response_text.split()) > 40:
         response_text = summarizer(response_text, max_length=40, min_length=15, do_sample=False)[0]["summary_text"]
+    
+    # Fall back to a safe response if generated text is inappropriate or too short
+    # if len(response_text.split
     
     # Fall back to a safe response if generated text is inappropriate or too short
     if len(response_text.split()) < 3:
@@ -605,6 +781,65 @@ def add_qa():
             "message": f"Error adding QA pair: {str(e)}"
         })
 
+
+@app.route("/check-interest-data", methods=["GET"])
+def check_interest_data():
+    """Check if interest report data is loaded"""
+    try:
+        # Check if we have entities or QA pairs related to interest
+        entity_count = 0
+        qa_count = 0
+        
+        # Count entities related to interest
+        for entity_type, entities in text_processor.data_processor.training_data["entities"].items():
+            entity_count += len(entities)
+        
+        # Count QA pairs (you might want to filter only interest-related ones)
+        qa_count = len(text_processor.data_processor.training_data["qa_pairs"])
+        
+        return jsonify({
+            "status": "success",
+            "data": {
+                "entity_count": entity_count,
+                "qa_count": qa_count,
+                "interest_data_loaded": entity_count > 0 or qa_count > 0
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error checking interest data: {str(e)}"
+        })
+
+
+
+def load_interest_report_csv():
+    """Load and process the interest report CSV file"""
+    CSV_FILE_PATH = r"C:\Users\Ajithkumar.p\OneDrive - Droidal.com\Desktop\Baashyam-AI\chat-bot\csv\interst_report 1.csv"
+    
+    try:
+        # Check if file exists
+        if not os.path.exists(CSV_FILE_PATH):
+            print(f"Error: CSV file not found at {CSV_FILE_PATH}")
+            return False, "CSV file not found"
+            
+        # Process the CSV file using the existing method
+        success, message = text_processor.data_processor.process_excel(CSV_FILE_PATH)
+        
+        # Reload embeddings if successful
+        if success:
+            text_processor.reload_embeddings()
+            print("Successfully loaded interest report CSV and updated embeddings")
+        else:
+            print(f"Error processing CSV: {message}")
+            
+        return success, message
+        
+    except Exception as e:
+        print(f"Error loading interest report CSV: {str(e)}")
+        return False, f"Error: {str(e)}"
+
 # Script to scrape website content
 def scrape_website():
     """
@@ -646,9 +881,11 @@ def scrape_website():
     except Exception as e:
         print(f"Error scraping website: {str(e)}")
 
-        
 
 if __name__ == "__main__":
+        # Load interest report CSV at startup
+    print("Loading interest report CSV...")
+    load_interest_report_csv()
     # Uncomment to scrape website content (run only once)
     # scrape_website()
     
