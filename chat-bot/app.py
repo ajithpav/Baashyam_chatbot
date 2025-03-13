@@ -144,6 +144,8 @@ class DataProcessor:
             # Read the file (works for both CSV and Excel)
             if excel_path.endswith('.csv'):
                 df = pd.read_csv(excel_path)
+                csv_texts = self.vectorize_csv_data(df)
+                print(f"Vectorized {len(csv_texts)} rows from CSV file")
             else:
                 df = pd.read_excel(excel_path)
             
@@ -538,8 +540,8 @@ class TextProcessor:
     # Add this to your DataProcessor.process_excel method after the dataframe is loaded
     # (around line 212, after reading the file)
     # Insert this right after: df = pd.read_excel(excel_path)
-    csv_texts = self.vectorize_csv_data(df)
-    print(f"Vectorized {len(csv_texts)} rows from CSV file")
+    # csv_texts = self.vectorize_csv_data(df)
+    # print(f"Vectorized {len(csv_texts)} rows from CSV file")
     
     
     def find_relevant_response(self, query, threshold=0.6):
