@@ -178,16 +178,19 @@ class DataProcessor:
             due_date_col = None
             total_interest_col = None
             
+            
             # Try to identify columns by common names
             for col in df.columns:
                 col_lower = str(col).lower()
-                if any(term in col_lower for term in ['id', 'cust id', 'customerid', 'customer_id']):
+                if any(term in col_lower for term in ['id', 'cust id', 'customerid', 'customer_id','alias_name',]):
                     customer_id_col = col
-                elif any(term in col_lower for term in ['name', 'customer name', 'customername']):
+                elif any(term in col_lower for term in ['name', 'customer name', 'customername','cust_name']):
                     customer_name_col = col
                 elif any(term in col_lower for term in ['due date', 'duedate']):
                     due_date_col = col
-                elif any(term in col_lower for term in ['interest', 'total interest']):
+                # elif any(term in col_lower for term in ['dur_amount']):
+                #     due_amount_col = col
+                elif any(term in col_lower for term in ['interest', 'total interest','total_interest']):
                     total_interest_col = col
             
             # If customer ID column is found, process customer data
@@ -429,7 +432,7 @@ class TextProcessor:
                 return qa_pair["answer"]
     
     # Extract customer ID if present
-        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', query_lower)
         customer_id = customer_id_match.group(0) if customer_id_match else None
     
     # Extract customer name if present
@@ -461,21 +464,21 @@ class TextProcessor:
                 if 'name' in query_lower or 'who is' in query_lower:
                     customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
                     name_match = re.search(r'Name: ([^.]+)', customer_info)
-                if name_match:
-                    return f"The customer name for {customer_id} is {name_match.group(1)}."
-            elif 'due date' in query_lower or 'when' in query_lower:
-                customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
-                due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
-                if due_date_match:
-                    return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
-            elif 'interest' in query_lower:
-                customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
-                interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
-                if interest_match:
-                    return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
-            else:
-                # Return full customer info
-                return self.data_processor.training_data["entities"]["customer"][customer_id]
+                    if name_match:
+                        return f"The customer name for {customer_id} is {name_match.group(1)}."
+                    elif 'due date' in query_lower or 'when' in query_lower:
+                        customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                        due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
+                        if due_date_match:
+                            return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
+                    elif 'interest' in query_lower:
+                        customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                        interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
+                        if interest_match:
+                            return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
+                    else:
+                        # Return full customer info
+                        return self.data_processor.training_data["entities"]["customer"][customer_id]
         
         # Check for total interest calculation query
         if 'total interest' in query_lower or 'interest calculated' in query_lower:
@@ -508,6 +511,37 @@ class TextProcessor:
         return None
 
     @lru_cache(maxsize=1000)
+    # Add this function to improve vector conversion of CSV data
+    def vectorize_csv_data(self, df):
+        """Convert CSV data to vector embeddings for better retrieval"""
+        csv_texts = []
+        
+        # For each row in the dataframe, create a text representation
+        for idx, row in df.iterrows():
+            row_text = " ".join([f"{col}: {val}" for col, val in row.items() if not pd.isna(val)])
+            csv_texts.append(row_text)
+        
+        # Convert these texts to embeddings
+        if csv_texts:
+            csv_embeddings = sentence_model.encode(csv_texts)
+            
+            # Store these embeddings with their source texts
+            if not hasattr(self, 'csv_embeddings'):
+                self.csv_embeddings = csv_embeddings
+                self.csv_texts = csv_texts
+            else:
+                self.csv_embeddings = np.vstack([self.csv_embeddings, csv_embeddings])
+                self.csv_texts.extend(csv_texts)
+        
+        return csv_texts
+
+    # Add this to your DataProcessor.process_excel method after the dataframe is loaded
+    # (around line 212, after reading the file)
+    # Insert this right after: df = pd.read_excel(excel_path)
+    csv_texts = self.vectorize_csv_data(df)
+    print(f"Vectorized {len(csv_texts)} rows from CSV file")
+    
+    
     def find_relevant_response(self, query, threshold=0.6):
         """Find relevant response with caching and parallel processing"""
         query_embedding = sentence_model.encode([query])
@@ -556,7 +590,7 @@ class TextProcessor:
         query_lower = query.lower()
         
         # Check for customer ID pattern
-        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', query_lower)
         # Enhanced customer name matching
         customer_name_match = re.search(r'(?:simon|kurian|a\.c\.|customer named|client named)', query_lower)
         if customer_id_match or customer_name_match:
@@ -599,8 +633,32 @@ def process_chat_input(text_processor, user_input):
     if not user_input:
         return "How can I help you with information about Bashyam Group today?"
     
+    csv_keywords = ["csv", "excel", "spreadsheet", "data", "report", "interest", "payment", "due date",
+                   "total interest", "customer", "client", "amount"]
+    
+    is_csv_query = any(keyword in user_input.lower() for keyword in csv_keywords)
+    
+    
+    if is_csv_query:
+        print("Detected likely CSV data query")
+        
+        # First check the training data which has processed CSV data
+        training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+        
+        if hasattr(text_processor.data_processor, 'csv_embeddings') and hasattr(text_processor.data_processor, 'csv_texts'):
+            query_embedding = sentence_model.encode([user_input])
+            similarities = cosine_similarity(query_embedding, text_processor.data_processor.csv_embeddings)[0]
+            max_sim = np.max(similarities)
+            
+            # If we have a good match in CSV data
+            if max_sim > 0.5:
+                best_match = text_processor.data_processor.csv_texts[np.argmax(similarities)]
+                return clean_response(f"From our records: {best_match}")
+    
     # Check for customer queries first
-    customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', user_input.lower())
+    customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', user_input.lower())
     # Add customer name matching
     customer_name_match = re.search(r'(?:name|customer|client)\s+(?:is|for|of|named)\s+([a-zA-Z\s\.]+)', user_input.lower())
     
@@ -867,6 +925,14 @@ def load_interest_report_csv():
         if not os.path.exists(CSV_FILE_PATH):
             print(f"Error: CSV file not found at {CSV_FILE_PATH}")
             return False, "CSV file not found"
+        
+        # Read the CSV file directly to ensure we have the data
+        df = pd.read_csv(CSV_FILE_PATH)
+        print(f"Loaded CSV with {len(df)} rows and columns: {df.columns.tolist()}")
+        
+         # Ensure we vectorize this data immediately
+        csv_texts = text_processor.data_processor.vectorize_csv_data(df)
+        print(f"Vectorized {len(csv_texts)} entries from CSV")
             
         # Process the CSV file using the existing method
         success, message = text_processor.data_processor.process_excel(CSV_FILE_PATH)
@@ -883,6 +949,22 @@ def load_interest_report_csv():
     except Exception as e:
         print(f"Error loading interest report CSV: {str(e)}")
         return False, f"Error: {str(e)}"
+    
+# Add this function to reload CSV data on demand
+@app.route("/reload-csv-data", methods=["POST"])
+def reload_csv_data():
+    """Reload CSV data on demand"""
+    try:
+        success, message = load_interest_report_csv()
+        return jsonify({
+            "status": "success" if success else "error",
+            "message": message
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error reloading CSV data: {str(e)}"
+        })
 
 # Script to scrape website content
 def scrape_website():
