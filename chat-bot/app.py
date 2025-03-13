@@ -234,6 +234,13 @@ class DataProcessor:
                                             f"The customer name for {cust_id} is {name}.")
                             self.add_qa_pair(f"Who is {cust_id}?", 
                                             f"{cust_id} refers to customer {name}.")
+                            
+                            # New QA pairs for name-based lookup
+                            
+                            self.add_qa_pair(f"customer named {name}", f"Customer {name} has ID {cust_id}. {description}")
+                            self.add_qa_pair(f"information for customer {name}", f"Customer {name} (ID: {cust_id}) details: {description}")
+                            self.add_qa_pair(f"interest for {name}", 
+                                             f"The total interest for customer {name} is {row[total_interest_col] if total_interest_col and not pd.isna(row[total_interest_col]) else 'not available'}.")
                         
                         if due_date_col and not pd.isna(row[due_date_col]):
                             due_date = row[due_date_col]
@@ -415,39 +422,60 @@ class TextProcessor:
     def search_training_data(self, query):
         """Search for answer in training data"""
         query_lower = query.lower()
-        
-        # Exact match in QA pairs
+    
+    # Exact match in QA pairs
         for qa_pair in self.data_processor.training_data["qa_pairs"]:
             if query_lower == qa_pair["question"].lower():
                 return qa_pair["answer"]
-        
-        # Extract customer ID if present
+    
+    # Extract customer ID if present
         customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
         customer_id = customer_id_match.group(0) if customer_id_match else None
-        
-        # If query mentions customer ID, look for specific customer entity
+    
+    # Extract customer name if present
+        customer_name_match = re.search(r'(?:name|customer|client)\s+(?:is|for|of|named)\s+([a-zA-Z\s\.]+)', query_lower)
+        customer_name = customer_name_match.group(1).strip() if customer_name_match else None
+    
+    # Check for name in entity descriptions if name query
+        if customer_name and "customer" in self.data_processor.training_data["entities"]:
+            for cust_id, description in self.data_processor.training_data["entities"]["customer"].items():
+                if customer_name.lower() in description.lower():
+                # Extract specific details based on query
+                    if 'due date' in query_lower:
+                        due_date_match = re.search(r'Due Date: ([^.]+)', description)
+                        if due_date_match:
+                            return f"The due date for customer {customer_name} is {due_date_match.group(1)}."
+                elif 'interest' in query_lower:
+                    interest_match = re.search(r'Total Interest: ([^.]+)', description) 
+                    if interest_match:
+                        return f"The total interest for customer {customer_name} is {interest_match.group(1)}."
+                else:
+                    # Return full customer info
+                    return f"Customer information for {customer_name}: {description}"
+    
+    # If query mentions customer ID, look for specific customer entity
         if customer_id and "customer" in self.data_processor.training_data["entities"]:
-            # Try exact match
+        # Try exact match
             if customer_id in self.data_processor.training_data["entities"]["customer"]:
-                # Check if asking about specific attribute
+            # Check if asking about specific attribute
                 if 'name' in query_lower or 'who is' in query_lower:
                     customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
                     name_match = re.search(r'Name: ([^.]+)', customer_info)
-                    if name_match:
-                        return f"The customer name for {customer_id} is {name_match.group(1)}."
-                elif 'due date' in query_lower or 'when' in query_lower:
-                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
-                    due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
-                    if due_date_match:
-                        return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
-                elif 'interest' in query_lower:
-                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
-                    interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
-                    if interest_match:
-                        return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
-                else:
-                    # Return full customer info
-                    return self.data_processor.training_data["entities"]["customer"][customer_id]
+                if name_match:
+                    return f"The customer name for {customer_id} is {name_match.group(1)}."
+            elif 'due date' in query_lower or 'when' in query_lower:
+                customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
+                if due_date_match:
+                    return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
+            elif 'interest' in query_lower:
+                customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
+                if interest_match:
+                    return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
+            else:
+                # Return full customer info
+                return self.data_processor.training_data["entities"]["customer"][customer_id]
         
         # Check for total interest calculation query
         if 'total interest' in query_lower or 'interest calculated' in query_lower:
@@ -529,7 +557,9 @@ class TextProcessor:
         
         # Check for customer ID pattern
         customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
-        if customer_id_match:
+        # Enhanced customer name matching
+        customer_name_match = re.search(r'(?:simon|kurian|a\.c\.|customer named|client named)', query_lower)
+        if customer_id_match or customer_name_match:
             return True
         
         # Check for customer-related keywords
@@ -571,15 +601,29 @@ def process_chat_input(text_processor, user_input):
     
     # Check for customer queries first
     customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', user_input.lower())
-    if customer_id_match:
-        customer_id = customer_id_match.group(0)
-        
-        # Check if we have data for this customer
-        training_response = text_processor.search_training_data(user_input)
+    # Add customer name matching
+    customer_name_match = re.search(r'(?:name|customer|client)\s+(?:is|for|of|named)\s+([a-zA-Z\s\.]+)', user_input.lower())
+    
+    if customer_id_match or customer_name_match:
+        #Try id first march
+        if customer_id_match:
+            customer_id = customer_id_match.group(0)
+            training_response = text_processor.search_training_data(user_input)
         if training_response:
             return clean_response(training_response)
-        else:
-            return f"I don't have specific information about customer {customer_id}. Please provide more details or ask about a different customer."
+        
+         # Then try name match
+        if customer_name_match:
+            customer_name = customer_name_match.group(1).strip()
+            # Create a query that searches for the customer by name
+            name_query = f"customer name {customer_name}"
+            training_response = text_processor.search_training_data(name_query)
+            if training_response:
+                return clean_response(training_response)
+            
+            # If no match found
+        search_term = customer_id_match.group(0) if customer_id_match else customer_name_match.group(1)
+        return f"I don't have specific information about customer {search_term}. Please provide more details or ask about a different customer."
     
     # Check for interest-related queries
     interest_keywords = ["interest", "total interest", "interest calculated", "interest amount"]
@@ -638,7 +682,7 @@ def process_chat_input(text_processor, user_input):
         input_ids=inputs["input_ids"],
         attention_mask=inputs["attention_mask"],
         max_length=150,
-        temperature=0.7,
+        temperature=0.3,
         top_k=50,
         top_p=0.9,
         repetition_penalty=1.2,
