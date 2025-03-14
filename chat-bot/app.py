@@ -1,395 +1,1048 @@
-from flask import Flask, render_template, request, jsonify
-import pandas as pd
 import os
-import traceback
-import logging
-from logging.handlers import RotatingFileHandler
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain.prompts import PromptTemplate
-from dotenv import load_dotenv
-import google.generativeai as genai
+import re
+import pandas as pd
+import numpy as np
+import threading
+import queue
+from functools import lru_cache
+from pathlib import Path
+import json
+
+# Flask imports
+from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+# NLP and ML imports
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Set up file logging
-log_dir = "logs"
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
+# PDF processing
+import PyPDF2
 
-# Configure logging to file with rotation
-log_file = os.path.join(log_dir, "chatbot.log")
-file_handler = RotatingFileHandler(log_file, maxBytes=10485760, backupCount=10)  # 10MB per file, keep 10 files max
-file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
-file_handler.setLevel(logging.INFO)
+# Excel processing is handled by pandas
 
-# Configure root logger
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(file_handler)
+# Initialize Flask app
+app = Flask(__name__, static_folder='static', template_folder='templates')
+CORS(app)
 
-# Add console logging for development
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
-logger.addHandler(console_handler)
+# Constants
+DATA_DIR = "data"
+OUTPUT_DIR = "output"
+WEBSITE_TEXT_PATH = f"{OUTPUT_DIR}/bashyam_website_text.txt"
+COMBINED_TEXT_PATH = f"{OUTPUT_DIR}/bashyam_combined_text.txt"
+CLEANED_TEXT_PATH = f"{OUTPUT_DIR}/bashyam_cleaned_text.txt"
+TRAINING_DATA_PATH = f"{OUTPUT_DIR}/bashyam_training_data.json"
 
-# Load environment variables
-load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    logger.error("GOOGLE_API_KEY not found in environment variables")
-    raise ValueError("GOOGLE_API_KEY is required")
+# Create necessary directories
+Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+
+# Load models and tokenizers (using smaller models for efficiency)
+model_name = "distilgpt2"  # Replace with your fine-tuned model when available
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
+sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+# Improved predefined responses with clear structure
+predefined_responses = {
+    # Company information
+    "about": "Bashyam Group is a well-established company that has been delivering quality services and products. We pride ourselves on our commitment to excellence and customer satisfaction.",
+    "about bashyam": "Bashyam Group is a well-established company that has been delivering quality services and products. We pride ourselves on our commitment to excellence and customer satisfaction.",
+    "bashyam group": "Bashyam Group is a well-established company that has been delivering quality services and products. We pride ourselves on our commitment to excellence and customer satisfaction.",
+    "who is the ceo": "To know more about our leadership team, please visit our website at https://www.bashyamgroup.com/about-us or contact us directly.",
     
-genai.configure(api_key=api_key)
+    # Contact information
+    "contact": "You can contact Bashyam Group through our website contact form at https://www.bashyamgroup.com/contact or call us at our office. We'll be happy to assist you.",
+    "contact us": "You can contact Bashyam Group through our website contact form at https://www.bashyamgroup.com/contact or call us at our office. We'll be happy to assist you.",
+    "email": "You can reach out to us via email through our contact page at https://www.bashyamgroup.com/contact.",
+    "phone": "For phone inquiries, please visit our contact page at https://www.bashyamgroup.com/contact to find the appropriate number for your needs.",
+    
+    # Services
+    "services": "Bashyam Group offers a wide range of services. Please visit our website at https://www.bashyamgroup.com/services for more detailed information about what we offer.",
+    "products": "For information about our products, please visit our website at https://www.bashyamgroup.com/products or contact us directly.",
+    
+    # Location
+    "location": "To find Bashyam Group's office locations, please visit our website at https://www.bashyamgroup.com/contact.",
+    "address": "For our office addresses, please check our contact page at https://www.bashyamgroup.com/contact.",
+    
+    # General
+    "hi": "Hello! I'm the Bashyam Group virtual assistant. How can I help you today?",
+    "hello": "Hello! I'm the Bashyam Group virtual assistant. How can I help you today?",
+    "help": "I can provide information about Bashyam Group, our services, contact details, and more. How can I assist you today?"
+}
 
-# Test API key validity
-try:
-    # Simple API call to test if key is valid
-    genai.list_models()
-    logger.info("API key validation successful")
-except Exception as e:
-    logger.error(f"API key validation failed: {e}")
-    raise ValueError(f"Invalid or inactive GOOGLE_API_KEY: {str(e)}")
+# Improved irrelevant question response with helpful guidance
+irrelevant_response = "I'm focused on providing information about Bashyam Group and our services. If you have questions about our company, products, services, or need assistance, I'd be happy to help. For other topics, you might want to try a general search engine."
 
-# Model configuration
-EMBEDDING_MODEL = "models/embedding-001"
-CHAT_MODEL = "gemini-pro"
+# Prompt templates for different types of queries
+prompt_templates = {
+    "general_info": "Provide information about Bashyam Group's {topic}.",
+    "contact": "Share contact details for Bashyam Group regarding {topic}.",
+    "service_info": "Explain the {service} service offered by Bashyam Group.",
+    "product_info": "Describe the {product} product from Bashyam Group.",
+    "project_info": "Give details about Bashyam Group's {project} project.",
+    "customer_info": "Provide details about customer {customer_id}.",
+    "irrelevant": "The query is not directly related to Bashyam Group. Provide a polite response directing to relevant information."
+}
 
-# Path to your CSV data - using a relative path instead of absolute
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-CSV_PATH = os.path.join(DATA_DIR, "interst_report 1.csv")
-
-# Create data directory if it doesn't exist
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-    logger.info(f"Created data directory at {DATA_DIR}")
-
-# Initialize vector store
-vector_store = None
-
-def load_and_process_csv():
-    """Loads CSV data and creates a vector store with detailed error handling."""
-    try:
-        # Use the global CSV_PATH but don't try to modify it
-        csv_file_path = CSV_PATH
-        
-        # Check if file exists
-        if not os.path.exists(csv_file_path):
-            logger.error(f"CSV file not found at path: {csv_file_path}")
-            logger.info(f"Looking for CSV files in data directory: {DATA_DIR}")
-            
-            # List available CSV files in the data directory
-            csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith('.csv')]
-            if csv_files:
-                logger.info(f"Found CSV files: {csv_files}")
-                # Use the first CSV file found
-                alternative_path = os.path.join(DATA_DIR, csv_files[0])
-                logger.info(f"Using alternative CSV file: {alternative_path}")
-                csv_file_path = alternative_path
-            else:
-                logger.error("No CSV files found in data directory")
-                return None
-            
-        # Load CSV with better error handling
-        logger.info(f"Loading CSV from {csv_file_path}")
+class DataProcessor:
+    """Process and manage various data sources"""
+    
+    def __init__(self):
+        """Initialize data processor"""
+        self.training_data = self._load_training_data()
+    
+    def _load_training_data(self):
+        """Load existing training data if available"""
+        if os.path.exists(TRAINING_DATA_PATH):
+            try:
+                with open(TRAINING_DATA_PATH, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return {"qa_pairs": [], "entities": {}}
+        return {"qa_pairs": [], "entities": {}}
+    
+    def _save_training_data(self):
+        """Save training data to file"""
+        with open(TRAINING_DATA_PATH, 'w', encoding='utf-8') as f:
+            json.dump(self.training_data, f, indent=4)
+    
+    def add_qa_pair(self, question, answer):
+        """Add a question-answer pair to training data"""
+        self.training_data["qa_pairs"].append({"question": question, "answer": answer})
+        self._save_training_data()
+    
+    def process_pdf(self, pdf_path):
+        """Extract text from PDF file"""
+        extracted_text = ""
         try:
-            df = pd.read_csv(csv_file_path, encoding='utf-8')
-        except UnicodeDecodeError:
-            # Try with a different encoding if utf-8 fails
-            logger.warning("UTF-8 encoding failed, trying with latin-1")
-            df = pd.read_csv(csv_file_path, encoding='latin-1')
-        
-        if df.empty:
-            logger.error("CSV file is empty")
-            return None
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                for page_num in range(len(reader.pages)):
+                    page = reader.pages[page_num]
+                    extracted_text += page.extract_text() + "\n\n"
             
-        # Log data shape for debugging
-        logger.info(f"Loaded DataFrame with shape: {df.shape}")
-        logger.info(f"DataFrame columns: {df.columns.tolist()}")
+            # Clean and save the extracted text
+            cleaned_text = self._clean_text(extracted_text)
+            output_path = f"{OUTPUT_DIR}/{os.path.basename(pdf_path)}.txt"
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(cleaned_text)
+            
+            # Update combined text
+            self._append_to_combined_text(cleaned_text)
+            
+            return True, f"Successfully processed {pdf_path}"
+        except Exception as e:
+            return False, f"Error processing PDF: {str(e)}"
+    
+    def process_excel(self, excel_path):
+        """Extract data from Excel/CSV file with improved customer data handling"""
+        try:
+            # Read the file (works for both CSV and Excel)
+            if excel_path.endswith('.csv'):
+                df = pd.read_csv(excel_path)
+                csv_texts = self.vectorize_csv_data(df)
+                print(f"Vectorized {len(csv_texts)} rows from CSV file")
+            else:
+                df = pd.read_excel(excel_path)
+            
+            # Display column names for debugging
+            print(f"CSV columns found: {df.columns.tolist()}")
+            
+            # Extract Q&A pairs if columns match expected format
+            qa_added = False
+            entity_added = False
+            
+            # Check for question-answer columns
+            if 'question' in df.columns and 'answer' in df.columns:
+                for _, row in df.iterrows():
+                    if not pd.isna(row['question']) and not pd.isna(row['answer']):
+                        self.add_qa_pair(row['question'], row['answer'])
+                        qa_added = True
+            
+            # Check for entity information (like products, services, etc.)
+            if 'entity_type' in df.columns and 'entity_name' in df.columns and 'description' in df.columns:
+                for _, row in df.iterrows():
+                    if not pd.isna(row['entity_type']) and not pd.isna(row['entity_name']) and not pd.isna(row['description']):
+                        entity_type = row['entity_type'].lower()
+                        if entity_type not in self.training_data["entities"]:
+                            self.training_data["entities"][entity_type] = {}
+                        
+                        self.training_data["entities"][entity_type][row['entity_name']] = row['description']
+                        entity_added = True
+            
+            # Handle customer data specifically - try to identify relevant columns
+            customer_id_col = None
+            customer_name_col = None
+            due_date_col = None
+            total_interest_col = None
+            
+            # Try to identify columns by common names
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if any(term in col_lower for term in ['id', 'cust id', 'customerid', 'customer_id','alias_name',]):
+                    customer_id_col = col
+                elif any(term in col_lower for term in ['name', 'customer name', 'customername','cust_name']):
+                    customer_name_col = col
+                elif any(term in col_lower for term in ['due date', 'duedate']):
+                    due_date_col = col
+                # elif any(term in col_lower for term in ['dur_amount']):
+                #     due_amount_col = col
+                elif any(term in col_lower for term in ['interest', 'total interest','total_interest']):
+                    total_interest_col = col
+            
+            # If customer ID column is found, process customer data
+            if customer_id_col:
+                # Initialize customer entity type if not exists
+                if "customer" not in self.training_data["entities"]:
+                    self.training_data["entities"]["customer"] = {}
+                
+                # Process each row
+                for _, row in df.iterrows():
+                    # Ensure customer ID is treated as string
+                    cust_id = str(row[customer_id_col]) if not pd.isna(row[customer_id_col]) else None
+                    
+                    if cust_id:
+                        # Create description based on available data
+                        details = []
+                        
+                        if customer_name_col and not pd.isna(row[customer_name_col]):
+                            details.append(f"Name: {row[customer_name_col]}")
+                        
+                        if due_date_col and not pd.isna(row[due_date_col]):
+                            details.append(f"Due Date: {row[due_date_col]}")
+                        
+                        if total_interest_col and not pd.isna(row[total_interest_col]):
+                            details.append(f"Total Interest: {row[total_interest_col]}")
+                        
+                        # Add any other columns as details
+                        for col in df.columns:
+                            if col not in [customer_id_col, customer_name_col, due_date_col, total_interest_col] and not pd.isna(row[col]):
+                                details.append(f"{col}: {row[col]}")
+                        
+                        # Create description
+                        description = f"Customer ID: {cust_id}. " + ". ".join(details)
+                        
+                        # Add to entities
+                        self.training_data["entities"]["customer"][cust_id] = description
+                        
+                        # Also add explicit QA pairs for common questions about this customer
+                        if customer_name_col and not pd.isna(row[customer_name_col]):
+                            name = row[customer_name_col]
+                            self.add_qa_pair(f"What is the customer name for {cust_id}?", 
+                                            f"The customer name for {cust_id} is {name}.")
+                            self.add_qa_pair(f"{cust_id} customer name", 
+                                            f"The customer name for {cust_id} is {name}.")
+                            self.add_qa_pair(f"Who is {cust_id}?", 
+                                            f"{cust_id} refers to customer {name}.")
+                            
+                            # New QA pairs for name-based lookup
+                            
+                            self.add_qa_pair(f"customer named {name}", f"Customer {name} has ID {cust_id}. {description}")
+                            self.add_qa_pair(f"information for customer {name}", f"Customer {name} (ID: {cust_id}) details: {description}")
+                            self.add_qa_pair(f"interest for {name}", 
+                                             f"The total interest for customer {name} is {row[total_interest_col] if total_interest_col and not pd.isna(row[total_interest_col]) else 'not available'}.")
+                        
+                        if due_date_col and not pd.isna(row[due_date_col]):
+                            due_date = row[due_date_col]
+                            self.add_qa_pair(f"What is the due date for {cust_id}?", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                            self.add_qa_pair(f"{cust_id} due date", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                            self.add_qa_pair(f"When is {cust_id} due?", 
+                                            f"The due date for customer {cust_id} is {due_date}.")
+                        
+                        if total_interest_col and not pd.isna(row[total_interest_col]):
+                            interest = row[total_interest_col]
+                            self.add_qa_pair(f"What is the total interest for {cust_id}?", 
+                                            f"The total interest for customer {cust_id} is {interest}.")
+                            self.add_qa_pair(f"{cust_id} total interest", 
+                                            f"The total interest for customer {cust_id} is {interest}.")
+                
+                # Add general questions about total interest across all customers
+                if total_interest_col:
+                    total_interest_sum = df[total_interest_col].sum() if pd.api.types.is_numeric_dtype(df[total_interest_col]) else "not calculable"
+                    self.add_qa_pair("What is the total interest calculated?", 
+                                    f"The total interest calculated across all customers is {total_interest_sum}.")
+                    self.add_qa_pair("Show me the total interest", 
+                                    f"The total interest calculated across all customers is {total_interest_sum}.")
+                    self.add_qa_pair("Sum of all interest", 
+                                    f"The sum of all interest payments is {total_interest_sum}.")
+                
+                entity_added = True
+            
+            # Save any changes
+            if qa_added or entity_added:
+                self._save_training_data()
+                
+            # Create a text representation to add to combined text
+            text_content = df.to_string(index=False)
+            output_path = f"{OUTPUT_DIR}/{os.path.basename(excel_path)}.txt"
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            
+            # Update combined text
+            self._append_to_combined_text(text_content)
+            
+            return True, f"Successfully processed {excel_path}"
+        except Exception as e:
+            print(f"Error processing Excel/CSV: {str(e)}")
+            return False, f"Error processing Excel/CSV: {str(e)}"
+    
+    def _clean_text(self, text):
+        """Clean extracted text"""
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Remove special characters except punctuation
+        text = re.sub(r'[^\w\s.,!?:;()\-\'"]', '', text)
+        return text.strip()
+    
+    def _append_to_combined_text(self, text):
+        """Append new text to combined text file"""
+        # Read existing combined text
+        existing_text = ""
+        if os.path.exists(COMBINED_TEXT_PATH):
+            with open(COMBINED_TEXT_PATH, 'r', encoding='utf-8') as f:
+                existing_text = f.read()
         
-        # Convert DataFrame to text
-        text = df.to_string(index=False)
+        # Append new text
+        with open(COMBINED_TEXT_PATH, 'w', encoding='utf-8') as f:
+            if existing_text:
+                f.write(f"{existing_text}\n\n{text}")
+            else:
+                f.write(text)
+
+class TextProcessor:
+    """Handle text processing and response generation"""
+    def __init__(self):
+        self.website_text = self._load_text_file(WEBSITE_TEXT_PATH)
+        self.combined_text = self._load_text_file(COMBINED_TEXT_PATH)
+        self.cleaned_text = self._load_text_file(CLEANED_TEXT_PATH)
         
-        # Split text into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        chunks = text_splitter.split_text(text)
-        logger.info(f"Created {len(chunks)} text chunks")
+        self.website_embeddings = None
+        self.combined_embeddings = None
+        self.cleaned_embeddings = None
         
-        # Create vector store
-        logger.info("Creating embeddings and vector store...")
-        embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-        vector_store = FAISS.from_texts(chunks, embedding=embeddings)
-        logger.info("Vector store created successfully")
+        self.website_sentences = None
+        self.combined_sentences = None
+        self.cleaned_sentences = None
         
-        return vector_store
-    except pd.errors.EmptyDataError:
-        logger.error("CSV file is empty or corrupted")
-        return None
-    except pd.errors.ParserError as e:
-        logger.error(f"Error parsing CSV: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error processing CSV data: {e}")
-        logger.error(traceback.format_exc())
+        # Load training data
+        self.data_processor = DataProcessor()
+        
+        # Initialize processing
+        self._prepare_embeddings()
+        self.response_cache = {}
+
+    def _load_text_file(self, file_path):
+        """Load and read text file"""
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as file:
+                return file.read()
+        return ""
+
+    def _prepare_embeddings(self):
+        """Prepare text embeddings for faster processing"""
+        self.website_sentences = self._process_text(self.website_text)
+        self.combined_sentences = self._process_text(self.combined_text)
+        self.cleaned_sentences = self._process_text(self.cleaned_text)
+        
+        if self.website_sentences:
+            self.website_embeddings = sentence_model.encode(self.website_sentences)
+        if self.combined_sentences:
+            self.combined_embeddings = sentence_model.encode(self.combined_sentences)
+        if self.cleaned_sentences:
+            self.cleaned_embeddings = sentence_model.encode(self.cleaned_sentences)
+
+    def reload_embeddings(self):
+        """Reload text and embeddings when data changes"""
+        self.combined_text = self._load_text_file(COMBINED_TEXT_PATH)
+        self._prepare_embeddings()
+
+    def _process_text(self, text):
+        """Process text into clean sentences"""
+        if not text:
+            return []
+            
+        sentences = [s.strip() for s in re.split(r'[.!?]', text) if len(s.strip()) > 20]
+        cleaned_sentences = []
+        
+        for sentence in sentences:
+            cleaned = self._clean_sentence(sentence)
+            if cleaned and len(cleaned.split()) >= 5:
+                cleaned_sentences.append(cleaned)
+                
+        return cleaned_sentences
+
+    def _clean_sentence(self, sentence):
+        """Clean individual sentence"""
+        cleaned = re.sub(r'[^\w\s.,!?:;()\-\'"]', '', sentence)
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.strip().capitalize()
+        if cleaned and not cleaned.endswith(('.', '!', '?')):
+            cleaned += '.'
+        return cleaned
+
+    def get_query_type(self, query):
+        """Determine the type of query to select appropriate template"""
+        query_lower = query.lower()
+        
+        # Check for customer ID pattern
+        customer_id_match = re.search(r'\b[a-z]{3,6}\d{5,8}\b', query_lower)
+        if customer_id_match or any(term in query_lower for term in ['customer', 'cust', 'client', 'cros']):
+            return "customer_info"
+        
+        # Check for contact related queries
+        if any(word in query_lower for word in ['contact', 'email', 'phone', 'call', 'reach']):
+            return "contact"
+            
+        # Check for service related queries
+        if any(word in query_lower for word in ['service', 'offer', 'provide', 'solution']):
+            return "service_info"
+            
+        # Check for product related queries
+        if any(word in query_lower for word in ['product', 'item', 'sell', 'buy', 'purchase']):
+            return "product_info"
+            
+        # Check for project related queries
+        if any(word in query_lower for word in ['project', 'work', 'portfolio', 'client', 'case study']):
+            return "project_info"
+            
+        # Check for interest-related queries
+        if any(word in query_lower for word in ['interest', 'due', 'payment', 'amount']):
+            return "customer_info"
+            
+        # Check if it's irrelevant
+        if not self.is_relevant_question(query):
+            return "irrelevant"
+            
+        # Default to general info
+        return "general_info"
+
+    def search_training_data(self, query):
+        query_lower = query.lower()
+    
+        # Extract customer ID if present
+        customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', query)
+        customer_id = customer_id_match.group(0) if customer_id_match else None
+    
+        # Extract customer name if present
+        customer_name_match = re.search(r'(?:name|customer|client)\s+(?:is|for|of|named)\s+([a-zA-Z\s\.]+)', query_lower)
+        customer_name = customer_name_match.group(1).strip() if customer_name_match else None
+        
+        # If no matches found by regex, check for direct mentions in the query
+        if not customer_name and 'kurian' in query_lower:
+            customer_name = 'Kurian'
+    
+        if not customer_id and 'cros137245' in query_lower.replace(' ', ''):
+            customer_id = 'CROS137245'  
+    
+    # Check for customer ID in entities database
+        if customer_id and "customer" in self.data_processor.training_data["entities"]:
+            if customer_id in self.data_processor.training_data["entities"]["customer"]:
+                customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                
+                # If specifically asking about interest
+                if 'interest' in query_lower or 'intrest' in query_lower:
+                    # Extract all payment details and format a comprehensive response
+                    name_match = re.search(r'Name: ([^.]+)', customer_info)
+                    due_match = re.search(r'Due Amount: ₹([^.]+)', customer_info)
+                    due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
+                    payment_date_match = re.search(r'Payment Date: ([^.]+)', customer_info)
+                    delay_match = re.search(r'Delay: (\d+)', customer_info)
+                    interest_rate_match = re.search(r'Interest Rate: ([^%]+)%', customer_info)
+                    interest_amount_match = re.search(r'Interest Amount: ₹([^.]+)', customer_info)
+                    gst_match = re.search(r'GST: ₹([^.]+)', customer_info)
+                    total_interest_match = re.search(r'Total Interest: ₹([^.]+)', customer_info)
+                    
+                    # Format detailed response with all available information
+                    response = f"{name_match.group(1) if name_match else customer_id} had a due amount of ₹{due_match.group(1) if due_match else 'N/A'} on {due_date_match.group(1) if due_date_match else 'N/A'}, under the title **\"On Booking.\"** "
+                    
+                    if payment_date_match:
+                        response += f"However, they made a partial payment on **{payment_date_match.group(1)},** "
+                    
+                    if delay_match:
+                        response += f"resulting in a delay of **{delay_match.group(1)} days.** "
+                    
+                    if interest_rate_match:
+                        response += f"Due to this delay, an interest rate of **{interest_rate_match.group(1)}%** was applied, "
+                    
+                    if interest_amount_match:
+                        response += f"leading to an interest charge of ₹{interest_amount_match.group(1)}. "
+                    
+                    if gst_match:
+                        response += f"Additionally, a **GST amount of ₹{gst_match.group(1)}** was added, "
+                    
+                    if total_interest_match:
+                        response += f"bringing the **total interest payable to ₹{total_interest_match.group(1)}.**"
+                    
+                    return response
+                else:
+                    # Return full customer info for other queries
+                    return customer_info
+    
+    # If query mentions customer ID, look for specific customer entity
+        if customer_id and "customer" in self.data_processor.training_data["entities"]:
+        # Try exact match
+            if customer_id in self.data_processor.training_data["entities"]["customer"]:
+            # Check if asking about specific attribute
+                if 'name' in query_lower or 'who is' in query_lower:
+                    customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                    name_match = re.search(r'Name: ([^.]+)', customer_info)
+                    if name_match:
+                        return f"The customer name for {customer_id} is {name_match.group(1)}."
+                    elif 'due date' in query_lower or 'when' in query_lower:
+                        customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                        due_date_match = re.search(r'Due Date: ([^.]+)', customer_info)
+                        if due_date_match:
+                            return f"The due date for customer {customer_id} is {due_date_match.group(1)}."
+                    elif 'interest' in query_lower:
+                        customer_info = self.data_processor.training_data["entities"]["customer"][customer_id]
+                        interest_match = re.search(r'Total Interest: ([^.]+)', customer_info)
+                        if interest_match:
+                            return f"The total interest for customer {customer_id} is {interest_match.group(1)}."
+                    else:
+                        # Return full customer info
+                        return self.data_processor.training_data["entities"]["customer"][customer_id]
+        
+        # Check for total interest calculation query
+        if 'total interest' in query_lower or 'interest calculated' in query_lower:
+            for qa_pair in self.data_processor.training_data["qa_pairs"]:
+                if 'total interest calculated' in qa_pair["question"].lower():
+                    return qa_pair["answer"]
+        
+        # Semantic similarity in QA pairs
+        query_embedding = sentence_model.encode([query])
+        best_score = 0.7  # Lowered threshold for better matches
+        best_answer = None
+        
+        for qa_pair in self.data_processor.training_data["qa_pairs"]:
+            question_embedding = sentence_model.encode([qa_pair["question"]])
+            similarity = cosine_similarity(query_embedding, question_embedding)[0][0]
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_answer = qa_pair["answer"]
+        
+        if best_answer:
+            return best_answer
+            
+        # General entity search
+        for entity_type, entities in self.data_processor.training_data["entities"].items():
+            for entity_name, description in entities.items():
+                if entity_name.lower() in query_lower:
+                    return f"{entity_name}: {description}"
+        
         return None
 
-def get_conversational_chain():
-    """Creates a conversational chain for question answering with improved prompt."""
-    prompt_template = """
-    You are a helpful assistant for Baashyaam Group, a real estate developer based in Chennai.
-    
-    Answer the question based on the context provided below. Be specific, clear, and concise.
-    If the exact answer is not in the context, say "I don't have specific information about that" 
-    and then provide general information about Baashyam Group that might be relevant.
-    
-    Format your answer professionally, using bullet points where appropriate.
-    
-    Context:
-    {context}
-    
-    Question:
-    {question}
-    
-    Answer:
-    """
+    @lru_cache(maxsize=1000)
+    # Add this function to improve vector conversion of CSV data
+    def vectorize_csv_data(self, df):
+        """Convert CSV data to vector embeddings for better retrieval"""
+        csv_texts = []
+        
+        # For each row in the dataframe, create a text representation
+        for idx, row in df.iterrows():
+            row_text = " ".join([f"{col}: {val}" for col, val in row.items() if not pd.isna(val)])
+            csv_texts.append(row_text)
+        
+        # Convert these texts to embeddings
+        if csv_texts:
+            csv_embeddings = sentence_model.encode(csv_texts)
+            
+            # Store these embeddings with their source texts
+            if not hasattr(self, 'csv_embeddings'):
+                self.csv_embeddings = csv_embeddings
+                self.csv_texts = csv_texts
+            else:
+                self.csv_embeddings = np.vstack([self.csv_embeddings, csv_embeddings])
+                self.csv_texts.extend(csv_texts)
+        
+        return csv_texts
 
-    try:
-        model = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0.3, max_output_tokens=1024)
-        prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-        chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-        return chain
-    except Exception as e:
-        logger.error(f"Error creating conversation chain: {e}")
-        logger.error(traceback.format_exc())
-        return None
+    # Add this to your DataProcessor.process_excel method after the dataframe is loaded
+    # (around line 212, after reading the file)
+    # Insert this right after: df = pd.read_excel(excel_path)
+    # csv_texts = self.vectorize_csv_data(df)
+    # print(f"Vectorized {len(csv_texts)} rows from CSV file")
+    
+    
+    def find_relevant_response(self, query, threshold=0.6):
+        """Find relevant response with caching and parallel processing"""
+        query_embedding = sentence_model.encode([query])
+        best_response = None
+        highest_similarity = threshold
+
+        def process_source(embeddings, sentences):
+            if embeddings is not None and len(sentences) > 0:
+                similarities = cosine_similarity(query_embedding, embeddings)[0]
+                max_sim = np.max(similarities)
+                if max_sim > highest_similarity:
+                    return (max_sim, sentences[np.argmax(similarities)])
+            return (highest_similarity, None)
+
+        # Process sources in parallel
+        threads = []
+        results = queue.Queue()
+        
+        sources = [
+            (self.website_embeddings, self.website_sentences),
+            (self.combined_embeddings, self.combined_sentences),
+            (self.cleaned_embeddings, self.cleaned_sentences)
+        ]
+
+        for embeddings, sentences in sources:
+            thread = threading.Thread(
+                target=lambda q, emb, sent: q.put(process_source(emb, sent)),
+                args=(results, embeddings, sentences)
+            )
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        while not results.empty():
+            sim, response = results.get()
+            if sim > highest_similarity and response:
+                highest_similarity = sim
+                best_response = response
+
+        return best_response
+    
+    def is_relevant_question(self, query):
+        """Determine if a question is relevant to Bashyam Group or customer data"""
+        query_lower = query.lower()
+        
+        # Check for customer ID pattern
+        customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', query_lower)
+        # Enhanced customer name matching
+        customer_name_match = re.search(r'(?:simon|kurian|a\.c\.|customer named|client named)', query_lower)
+        if customer_id_match or customer_name_match:
+            return True
+        
+        # Check for customer-related keywords
+        customer_keywords = ["customer", "cust", "client", "cros", "interest", "due date", "payment"]
+        for keyword in customer_keywords:
+            if keyword in query_lower:
+                return True
+        
+        # List of company-related keywords
+        company_keywords = [
+            "bashyam", "baashyam", "group", "company", "services", "products", "location", 
+            "contact", "project", "client", "team", "about", "history", "ceo", 
+            "management", "career", "job", "opportunity", "partner", "solution", "office"
+        ]
+        
+        # Check if any company keyword is in the query
+        for keyword in company_keywords:
+            if keyword in query_lower:
+                return True
+                
+        # Check similarity with predefined responses
+        for key in predefined_responses.keys():
+            if key in query_lower:
+                return True
+                
+        # Check if the query has any relevance to the website content
+        relevant_response = self.find_relevant_response(query, threshold=0.4)
+        if relevant_response:
+            return True
+            
+        return False
+
+def process_chat_input(text_processor, user_input):
+    """Process text input and generate response with improved handling"""
+    user_input = user_input.strip()
+    
+    if not user_input:
+        return "How can I help you with information about Bashyam Group today?"
+    
+    csv_keywords = ["csv", "excel", "spreadsheet", "data", "report", "interest", "payment", "due date",
+                   "total interest", "customer", "client", "amount"]
+    
+    is_csv_query = any(keyword in user_input.lower() for keyword in csv_keywords)
+    
+    
+    if is_csv_query:
+        print("Detected likely CSV data query")
+        
+        # First check the training data which has processed CSV data
+        training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+        
+        if hasattr(text_processor.data_processor, 'csv_embeddings') and hasattr(text_processor.data_processor, 'csv_texts'):
+            query_embedding = sentence_model.encode([user_input])
+            similarities = cosine_similarity(query_embedding, text_processor.data_processor.csv_embeddings)[0]
+            max_sim = np.max(similarities)
+            
+            # If we have a good match in CSV data
+            if max_sim > 0.5:
+                best_match = text_processor.data_processor.csv_texts[np.argmax(similarities)]
+                return clean_response(f"From our records: {best_match}")
+    
+    # Check for customer queries first
+    customer_id_match = re.search(r'\b[a-zA-Z]{3,6}\d{5,8}\b', user_input.lower())
+    # Add customer name matching
+    customer_name_match = re.search(r'(?:name|customer|client)\s+(?:is|for|of|named)\s+([a-zA-Z\s\.]+)', user_input.lower())
+    
+    if customer_id_match or customer_name_match:
+        #Try id first march
+        if customer_id_match:
+            customer_id = customer_id_match.group(0)
+            training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+        
+         # Then try name match
+        if customer_name_match:
+            customer_name = customer_name_match.group(1).strip()
+            # Create a query that searches for the customer by name
+            name_query = f"customer name {customer_name}"
+            training_response = text_processor.search_training_data(name_query)
+            if training_response:
+                return clean_response(training_response)
+            
+            # If no match found
+        search_term = customer_id_match.group(0) if customer_id_match else customer_name_match.group(1)
+        return f"I don't have specific information about customer {search_term}. Please provide more details or ask about a different customer."
+    
+    # Check for interest-related queries
+    interest_keywords = ["interest", "total interest", "interest calculated", "interest amount"]
+    if any(keyword in user_input.lower() for keyword in interest_keywords):
+        training_response = text_processor.search_training_data(user_input)
+        if training_response:
+            return clean_response(training_response)
+    
+    # Check training data next
+    training_response = text_processor.search_training_data(user_input)
+    if training_response:
+        return clean_response(training_response)
+    
+    # Check for exact matches in predefined responses
+    for key, response in predefined_responses.items():
+        if user_input.lower() == key.lower():
+            return clean_response(response)
+    
+    # Check for partial matches in predefined responses
+    for key, response in predefined_responses.items():
+        if key.lower() in user_input.lower() or user_input.lower() in key.lower():
+            return clean_response(response)
+    
+    # Check if query is irrelevant
+    if not text_processor.is_relevant_question(user_input):
+        return irrelevant_response
+    
+    # Get relevant response
+    relevant_response = text_processor.find_relevant_response(user_input)
+    if relevant_response:
+        if len(relevant_response.split()) > 40:
+            relevant_response = summarizer(relevant_response, max_length=40, min_length=15, do_sample=False)[0]["summary_text"]
+        return clean_response(relevant_response)
+
+    # Use model as fallback with appropriate prompt template
+    query_type = text_processor.get_query_type(user_input)
+    prompt_template = prompt_templates.get(query_type, prompt_templates["general_info"])
+    
+    # Extract topic from user query
+    # Simple extraction: take the last few words
+    topic = " ".join(user_input.split()[-3:]) if len(user_input.split()) > 3 else user_input
+    
+    # Format the prompt
+    formatted_prompt = prompt_template.format(
+        topic=topic,
+        service=topic,
+        product=topic,
+        project=topic,
+        customer_id=customer_id_match.group(0) if customer_id_match else "unknown"
+    )
+    
+    # Generate response
+    combined_input = f"{formatted_prompt} Query: {user_input}"
+    inputs = tokenizer(combined_input, return_tensors="pt", padding=True, truncation=True)
+    outputs = model.generate(
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_length=150,
+        temperature=0.3,
+        top_k=50,
+        top_p=0.9,
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=3,
+        do_sample=True,
+        num_return_sequences=1
+    )
+    
+    response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Remove the prompt from the response if it appears
+    response_text = response_text.replace(formatted_prompt, "").replace(f"Query: {user_input}", "")
+    response_text = clean_response(response_text)
+    
+    # If response is too long, summarize it
+    if len(response_text.split()) > 40:
+        response_text = summarizer(response_text, max_length=40, min_length=15, do_sample=False)[0]["summary_text"]
+    
+    # Fall back to a safe response if generated text is inappropriate or too short
+    # if len(response_text.split
+    
+    # Fall back to a safe response if generated text is inappropriate or too short
+    if len(response_text.split()) < 3:
+        response_text = "I'd be happy to help with your inquiry about Bashyam Group. Could you please provide more details about what you'd like to know?"
+    
+    return clean_response(response_text)
+
+def clean_response(text):
+    """Clean and format response text"""
+    if not text:
+        return "I'd be happy to help with information about Bashyam Group. Could you please provide more details?"
+        
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = text.strip()
+    
+    # Ensure first letter is capitalized
+    if text and len(text) > 0:
+        text = text[0].upper() + text[1:]
+    
+    # Ensure there's proper punctuation at the end
+    if text and not text.endswith(('.', '!', '?')):
+        text += '.'
+    
+    return text
+
+# Initialize text processor
+text_processor = TextProcessor()
 
 @app.route('/')
 def home():
-    """Render the home page."""
+    """Render home page"""
     return render_template('index.html')
 
-@app.route('/chat', methods=['POST'])
+@app.route("/chat", methods=["POST"])
 def chat():
-    """Handle chat requests with improved error handling and debugging."""
-    global vector_store
-    
-    # Log request details
-    request_data = request.json
-    request_id = id(request)
-    logger.info(f"Request {request_id}: New chat request received")
-    
-    # Load vector store if not already loaded
-    if vector_store is None:
-        logger.info(f"Request {request_id}: Vector store not initialized, loading now...")
-        vector_store = load_and_process_csv()
-        if vector_store is None:
-            logger.error(f"Request {request_id}: Failed to initialize vector store")
-            return jsonify({
-                "response": "I'm having trouble accessing the information database. Please try again later or contact support.",
-                "status": "error"
-            })
-    
-    # Get the user query from the request
-    user_question = request_data.get('message', '')
-    
-    if not user_question:
-        logger.warning(f"Request {request_id}: Empty question received")
-        return jsonify({
-            "response": "I didn't receive your question. Please try again.",
-            "status": "error"
-        })
-    
-    logger.info(f"Request {request_id}: Processing question: {user_question}")
-    
+    """Handle text chat requests"""
     try:
-        # Query the vector store
-        embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-        logger.info(f"Request {request_id}: Searching vector store")
-        docs = vector_store.similarity_search(user_question, k=4)  # Retrieve top 4 documents
-        
-        if not docs:
-            logger.warning(f"Request {request_id}: No relevant documents found")
-            return jsonify({
-                "response": "I couldn't find specific information related to your question. Please try asking something else about Baashyam Group.",
-                "status": "no_docs"
-            })
-            
-        logger.info(f"Request {request_id}: Found {len(docs)} relevant documents")
-        
-        # Log the document content for debugging (truncated for log readability)
-        for i, doc in enumerate(docs):
-            content_preview = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
-            logger.debug(f"Request {request_id}: Doc {i+1} preview: {content_preview}")
-        
-        # Get response from the conversational chain
-        logger.info(f"Request {request_id}: Creating conversation chain")
-        chain = get_conversational_chain()
-        if not chain:
-            logger.error(f"Request {request_id}: Failed to create conversation chain")
-            return jsonify({
-                "response": "I'm experiencing a technical issue. Please try again later.",
-                "status": "error"
-            })
-        
-        logger.info(f"Request {request_id}: Generating response")
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        
-        # Log the response for debugging (truncated for log readability)
-        response_text = response.get("output_text", "No response generated")
-        response_preview = response_text[:100] + "..." if len(response_text) > 100 else response_text
-        logger.info(f"Request {request_id}: Generated response: {response_preview}")
-        
-        return jsonify({
-            "response": response_text,
-            "status": "success"
-        })
+        data = request.json
+        user_input = data.get("message", "").strip()
+
+        if not user_input:
+            return jsonify({"response": "I didn't receive any input. How can I help you with information about Bashyam Group?"})
+
+        response = process_chat_input(text_processor, user_input)
+        return jsonify({"response": response})
+    
     except Exception as e:
-        error_message = str(e)
-        logger.error(f"Request {request_id}: Error processing query: {error_message}")
-        logger.error(traceback.format_exc())
+        print(f"Chat Error: {str(e)}")
+        return jsonify({
+            "response": "I apologize, but I'm having trouble processing your request. Could you please rephrase your question about Bashyam Group?"
+        })
+
+@app.route("/upload-training-data", methods=["POST"])
+def upload_training_data():
+    """Handle file uploads for training data"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({"status": "error", "message": "No file part"})
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"status": "error", "message": "No selected file"})
+            
+        # Save the file
+        file_path = os.path.join(DATA_DIR, file.filename)
+        file.save(file_path)
         
-        # Provide a more helpful error message
-        if "API" in error_message or "key" in error_message.lower():
-            return jsonify({
-                "response": "I'm having trouble connecting to my knowledge service. Please try again later.",
-                "status": "api_error"
-            })
-        elif "timeout" in error_message.lower():
-            return jsonify({
-                "response": "The request timed out. Please try asking a simpler question.",
-                "status": "timeout"
-            })
+        # Process the file based on its type
+        success = False
+        message = ""
+        
+        if file.filename.endswith('.pdf'):
+            success, message = text_processor.data_processor.process_pdf(file_path)
+        elif file.filename.endswith(('.xls', '.xlsx', '.csv')):
+            success, message = text_processor.data_processor.process_excel(file_path)
         else:
-            return jsonify({
-                "response": "I encountered an error while processing your question. Please try again with a different question.",
-                "status": "error"
-            })
-
-@app.route('/reset', methods=['POST'])
-def reset():
-    """Reset the vector store (useful for updating data)."""
-    global vector_store
-    vector_store = None
-    logger.info("Vector store has been reset")
-    return jsonify({"response": "Knowledge base has been reset.", "status": "success"})
-
-# Common responses for predefined queries
-@app.route('/predefined', methods=['POST'])
-def predefined():
-    """Handle predefined responses."""
-    data = request.json
-    query = data.get('message', '')
-    request_id = id(request)
-    logger.info(f"Request {request_id}: Predefined query received: {query}")
-    
-    predefined_responses = {
-        "Contact Sales": "You can contact our sales team at sales@baashyam.com or call us at +91-44-2345-6789.",
-        "About Baashyam": "Baashyaam Group, established over three decades ago, is a prominent real estate developer based in Chennai, Tamil Nadu. The company has a diverse portfolio that includes affordable housing, independent villas, premium living spaces, luxury residences, townships, and commercial buildings.",
-        "Contact us": "You can reach us at info@baashyam.com or visit our office at 123 Anna Salai, Chennai, Tamil Nadu. Our customer service number is +91-44-2345-6789.",
-        "Projects": "Baashyaam Group has several ongoing projects in Chennai including Baashyaam Pinnacle, Baashyaam Harmony, and Baashyaam Towers. Our projects range from affordable housing to luxury apartments.",
-        "Offers": "We currently have special festive season offers including 5% discount on booking amount and free modular kitchen for selected properties. Contact our sales team for more details."
-    }
-    
-    response = predefined_responses.get(query, "I don't have a predefined answer for that query. Please ask something else.")
-    logger.info(f"Request {request_id}: Returned predefined response for '{query}'")
-    return jsonify({"response": response, "status": "success"})
-
-# Add a new route to check application health and debug CSV loading
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Check if the application is running and the vector store is loaded."""
-    global vector_store
-    vector_store_status = "loaded" if vector_store is not None else "not_loaded"
-    
-    # Additional diagnostic information
-    csv_exists = os.path.exists(CSV_PATH)
-    csv_size = os.path.getsize(CSV_PATH) if csv_exists else 0
-    csv_info = {
-        "path": CSV_PATH,
-        "exists": csv_exists,
-        "size_bytes": csv_size
-    }
-    
-    # Test API key (limited check)
-    api_status = "valid"
-    try:
-        genai.list_models()
+            message = "Unsupported file type. Please upload PDF, Excel or CSV files."
+            
+        # Reload embeddings if successful
+        if success:
+            text_processor.reload_embeddings()
+            
+        return jsonify({
+            "status": "success" if success else "error",
+            "message": message
+        })
+        
     except Exception as e:
-        api_status = f"error: {str(e)}"
-    
-    logger.info(f"Health check: Application is running, vector store is {vector_store_status}")
-    return jsonify({
-        "status": "healthy",
-        "vector_store": vector_store_status,
-        "csv": csv_info,
-        "api_key": api_status,
-        "models": {
-            "embedding": EMBEDDING_MODEL,
-            "chat": CHAT_MODEL
-        }
-    })
+        print(f"Upload Error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Error processing file: {str(e)}"
+        })
 
-# New debug endpoint to test CSV loading directly
-@app.route('/debug/load-csv', methods=['GET'])
-def debug_load_csv():
-    """Attempt to load CSV and return diagnostic information."""
+@app.route("/add-qa", methods=["POST"])
+def add_qa():
+    """Add a question-answer pair to training data"""
     try:
-        # Check file existence
-        csv_exists = os.path.exists(CSV_PATH)
-        if not csv_exists:
+        data = request.json
+        question = data.get("question", "").strip()
+        answer = data.get("answer", "").strip()
+        
+        if not question or not answer:
             return jsonify({
-                "status": "error",
-                "message": f"CSV file not found at {CSV_PATH}",
-                "data_dir_exists": os.path.exists(DATA_DIR),
-                "available_files": os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else []
+                "status": "error", 
+                "message": "Both question and answer are required"
             })
             
-        # Try loading with pandas
-        try:
-            df = pd.read_csv(CSV_PATH, encoding='utf-8')
-        except UnicodeDecodeError:
-            df = pd.read_csv(CSV_PATH, encoding='latin-1')
+        text_processor.data_processor.add_qa_pair(question, answer)
         
         return jsonify({
             "status": "success",
-            "message": "CSV loaded successfully",
-            "rows": len(df),
-            "columns": df.columns.tolist(),
-            "preview": df.head(3).to_dict(orient="records")
+            "message": "Question-answer pair added successfully"
+        })
+        
+    except Exception as e:
+        print(f"Add QA Error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Error adding QA pair: {str(e)}"
+        })
+
+
+@app.route("/check-interest-data", methods=["GET"])
+def check_interest_data():
+    """Check if interest report data is loaded"""
+    try:
+        # Check if we have entities or QA pairs related to interest
+        entity_count = 0
+        qa_count = 0
+        
+        # Count entities related to interest
+        for entity_type, entities in text_processor.data_processor.training_data["entities"].items():
+            entity_count += len(entities)
+        
+        # Count QA pairs (you might want to filter only interest-related ones)
+        qa_count = len(text_processor.data_processor.training_data["qa_pairs"])
+        
+        return jsonify({
+            "status": "success",
+            "data": {
+                "entity_count": entity_count,
+                "qa_count": qa_count,
+                "interest_data_loaded": entity_count > 0 or qa_count > 0
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error checking interest data: {str(e)}"
+        })
+
+
+
+def load_interest_report_csv():
+    """Load and process the interest report CSV file"""
+    CSV_FILE_PATH = r"C:\Users\Ajithkumar.p\OneDrive - Droidal.com\Desktop\Baashyam-AI\chat-bot\csv\interst_report 1.csv"
+    
+    try:
+        # Check if file exists
+        if not os.path.exists(CSV_FILE_PATH):
+            print(f"Error: CSV file not found at {CSV_FILE_PATH}")
+            return False, "CSV file not found"
+        
+        # Read the CSV file directly to ensure we have the data
+        df = pd.read_csv(CSV_FILE_PATH)
+        print(f"Loaded CSV with {len(df)} rows and columns: {df.columns.tolist()}")
+        
+         # Ensure we vectorize this data immediately
+        csv_texts = text_processor.data_processor.vectorize_csv_data(df)
+        print(f"Vectorized {len(csv_texts)} entries from CSV")
+            
+        # Process the CSV file using the existing method
+        success, message = text_processor.data_processor.process_excel(CSV_FILE_PATH)
+        
+        # Reload embeddings if successful
+        if success:
+            text_processor.reload_embeddings()
+            print("Successfully loaded interest report CSV and updated embeddings")
+        else:
+            print(f"Error processing CSV: {message}")
+            
+        return success, message
+        
+    except Exception as e:
+        print(f"Error loading interest report CSV: {str(e)}")
+        return False, f"Error: {str(e)}"
+    
+# Add this function to reload CSV data on demand
+@app.route("/reload-csv-data", methods=["POST"])
+def reload_csv_data():
+    """Reload CSV data on demand"""
+    try:
+        success, message = load_interest_report_csv()
+        return jsonify({
+            "status": "success" if success else "error",
+            "message": message
         })
     except Exception as e:
         return jsonify({
             "status": "error",
-            "message": f"Error loading CSV: {str(e)}",
-            "traceback": traceback.format_exc()
+            "message": f"Error reloading CSV data: {str(e)}"
         })
 
-if __name__ == '__main__':
+# Script to scrape website content
+def scrape_website():
+    """
+    Scrape content from Bashyam Group website and save to files
+    This function should be run once to populate the text files
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    
     try:
-        # Create required directories
-        os.makedirs(DATA_DIR, exist_ok=True)
+        # Get website content
+        response = requests.get("https://www.bashyamgroup.com/")
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Print startup information
-        logger.info(f"Starting application with:")
-        logger.info(f"- CSV path: {CSV_PATH}")
-        logger.info(f"- Data directory: {DATA_DIR}")
-        logger.info(f"- Embedding model: {EMBEDDING_MODEL}")
-        logger.info(f"- Chat model: {CHAT_MODEL}")
+        # Extract text
+        text_content = soup.get_text(separator=' ', strip=True)
         
-        # Initialize the vector store on startup
-        logger.info("Initializing vector store on startup...")
-        vector_store = load_and_process_csv()
-        if vector_store is None:
-            logger.warning("Vector store could not be initialized on startup")
-        else:
-            logger.info("Vector store initialized successfully")
+        # Save website text
+        with open(WEBSITE_TEXT_PATH, "w", encoding="utf-8") as file:
+            file.write(text_content)
             
-        app.run(debug=True, port=5005)
+        # Clean the text
+        cleaned_text = ' '.join(text_content.split())
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        
+        # Save cleaned text
+        with open(CLEANED_TEXT_PATH, "w", encoding="utf-8") as file:
+            file.write(cleaned_text)
+            
+        # Combine text (you can add more sources here)
+        combined_text = cleaned_text
+        
+        # Save combined text
+        with open(COMBINED_TEXT_PATH, "w", encoding="utf-8") as file:
+            file.write(combined_text)
+            
+        print("Website content scraped successfully.")
+        
     except Exception as e:
-        logger.critical(f"Failed to start application: {e}")
-        logger.critical(traceback.format_exc())
+        print(f"Error scraping website: {str(e)}")
+
+
+if __name__ == "__main__":
+        # Load interest report CSV at startup
+    print("Loading interest report CSV...")
+    load_interest_report_csv()
+    # Uncomment to scrape website content (run only once)
+    # scrape_website()
+    
+    # Run the Flask app
+    app.run(host="0.0.0.0", port=5005, debug=True)
