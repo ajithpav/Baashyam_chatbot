@@ -67,7 +67,6 @@ CSV_PATH = r"C:\Users\Ajithkumar.p\OneDrive - Droidal.com\Desktop\Baashyam-AI\ch
 
 # Path to your CSV data - using a relative path instead of absolute
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-# CSV_PATH = os.path.join(DATA_DIR, "interst_report 1/.csv")
 
 # Create data directory if it doesn't exist
 if not os.path.exists(DATA_DIR):
@@ -76,6 +75,50 @@ if not os.path.exists(DATA_DIR):
 
 # Initialize vector store
 vector_store = None
+
+# Add company information as text data
+COMPANY_INFO = """
+Baashyaam Group:
+Baashyaam Group is a leading real estate developer based in Chennai, Tamil Nadu, established over three decades ago. The company specializes in developing residential and commercial properties across Chennai and surrounding areas.
+
+About Us:
+Founded with a vision to create quality living spaces, Baashyaam Group has evolved into one of South India's trusted real estate developers. We focus on sustainable development, innovative design, and customer satisfaction.
+
+Our Projects:
+1. Baashyaam Pinnacle - Luxury apartments in OMR, Chennai
+2. Baashyaam Harmony - Gated community villas in ECR, Chennai
+3. Baashyaam La Celestia - High-rise apartments in Porur, Chennai
+4. Baashyaam Green Habitat - Eco-friendly residential township in Kelambakkam
+5. Baashyaam Business Park - Commercial office space in Guindy
+
+Company Mission:
+To create sustainable living spaces that enhance the quality of life for our customers through innovation, integrity, and excellence in construction.
+
+Company Vision:
+To be the most trusted and respected real estate developer in South India, recognized for quality, innovation, and customer satisfaction.
+
+Contact Information:
+- Head Office: 123 Anna Salai, Chennai, Tamil Nadu - 600002
+- Phone: +91-44-2345-6789
+- Email: info@baashyaam.com
+- Website: www.baashyaam.com
+
+Sales Inquiries:
+- Email: sales@baashyaam.com
+- Phone: +91-44-2345-7890
+
+Current Offers:
+- Festive season discount of 5% on booking amount
+- Free modular kitchen for selected properties
+- Special payment plans with no EMI for 12 months
+- Referral bonus of ₹50,000 for successful referrals
+
+Achievements:
+- CREDAI Best Developer Award 2022
+- CNBC Awaaz Real Estate Award for Best Residential Project 2021
+- ISO 9001:2015 Certified Company
+- IGBC Green Building Certification for multiple projects
+"""
 
 def load_and_process_csv():
     """Loads CSV data and creates a vector store with detailed error handling."""
@@ -120,9 +163,12 @@ def load_and_process_csv():
         # Convert DataFrame to text
         text = df.to_string(index=False)
         
+        # Combine with company information
+        all_text = COMPANY_INFO + "\n\n" + text
+        
         # Split text into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        chunks = text_splitter.split_text(text)
+        chunks = text_splitter.split_text(all_text)
         logger.info(f"Created {len(chunks)} text chunks")
         
         # Create vector store
@@ -149,8 +195,8 @@ def get_conversational_chain():
     You are a helpful assistant for Baashyaam Group, a real estate developer based in Chennai.
     
     Answer the question based on the context provided below. Be specific, clear, and concise.
-    If the exact answer is not in the context, say "I don't have specific information about that" 
-    and then provide general information about Baashyam Group that might be relevant.
+    If the exact answer is not in the context, politely mention that you don't have specific 
+    information about that and then provide general information about Baashyaam Group that might be relevant.
     
     Format your answer professionally, using bullet points where appropriate.
     
@@ -179,6 +225,20 @@ def get_conversational_chain():
         logger.error(traceback.format_exc())
         return None
 
+# Common responses for predefined queries
+PREDEFINED_RESPONSES = {
+    "contact sales": "You can contact our sales team at sales@baashyaam.com or call us at +91-44-2345-7890.",
+    "about baashyaam": "Baashyaam Group, established over three decades ago, is a prominent real estate developer based in Chennai, Tamil Nadu. The company has a diverse portfolio that includes affordable housing, independent villas, premium living spaces, luxury residences, townships, and commercial buildings.",
+    "contact us": "You can reach us at info@baashyaam.com or visit our office at 123 Anna Salai, Chennai, Tamil Nadu - 600002. Our customer service number is +91-44-2345-6789.",
+    "projects": "Baashyaam Group has several ongoing projects in Chennai including Baashyaam Pinnacle (Luxury apartments in OMR), Baashyaam Harmony (Gated community villas in ECR), Baashyaam La Celestia (High-rise apartments in Porur), Baashyaam Green Habitat (Eco-friendly township in Kelambakkam), and Baashyaam Business Park (Commercial office space in Guindy).",
+    "offers": "We currently have special festive season offers including 5% discount on booking amount, free modular kitchen for selected properties, special payment plans with no EMI for 12 months, and a referral bonus of ₹50,000 for successful referrals.",
+    "mission": "Our mission is to create sustainable living spaces that enhance the quality of life for our customers through innovation, integrity, and excellence in construction.",
+    "vision": "Our vision is to be the most trusted and respected real estate developer in South India, recognized for quality, innovation, and customer satisfaction.",
+    "achievements": "Baashyaam Group has received the CREDAI Best Developer Award 2022, CNBC Awaaz Real Estate Award for Best Residential Project 2021, is an ISO 9001:2015 Certified Company, and has IGBC Green Building Certification for multiple projects.",
+    "what is baashyaam": "Baashyaam Group is a leading real estate developer based in Chennai, Tamil Nadu, established over three decades ago. The company specializes in developing residential and commercial properties across Chennai and surrounding areas.",
+    "goal of baashyaam": "The goal of Baashyaam Group is to create sustainable living spaces that enhance the quality of life for customers through innovation, integrity, and excellence in construction. The company aims to be the most trusted and respected real estate developer in South India."
+}
+
 @app.route('/')
 def home():
     """Render the home page."""
@@ -194,6 +254,27 @@ def chat():
     request_id = id(request)
     logger.info(f"Request {request_id}: New chat request received")
     
+    # Get the user query from the request
+    user_question = request_data.get('message', '').strip().lower()
+    
+    if not user_question:
+        logger.warning(f"Request {request_id}: Empty question received")
+        return jsonify({
+            "response": "I didn't receive your question. Please try again.",
+            "status": "error"
+        })
+    
+    logger.info(f"Request {request_id}: Processing question: {user_question}")
+    
+    # Check for predefined responses first
+    for key, response in PREDEFINED_RESPONSES.items():
+        if key in user_question or user_question in key:
+            logger.info(f"Request {request_id}: Matched predefined response for '{key}'")
+            return jsonify({
+                "response": response,
+                "status": "success"
+            })
+    
     # Load vector store if not already loaded
     if vector_store is None:
         logger.info(f"Request {request_id}: Vector store not initialized, loading now...")
@@ -204,18 +285,6 @@ def chat():
                 "response": "I'm having trouble accessing the information database. Please try again later or contact support.",
                 "status": "error"
             })
-    
-    # Get the user query from the request
-    user_question = request_data.get('message', '')
-    
-    if not user_question:
-        logger.warning(f"Request {request_id}: Empty question received")
-        return jsonify({
-            "response": "I didn't receive your question. Please try again.",
-            "status": "error"
-        })
-    
-    logger.info(f"Request {request_id}: Processing question: {user_question}")
     
     try:
         # Query the vector store
@@ -289,99 +358,28 @@ def reset():
     logger.info("Vector store has been reset")
     return jsonify({"response": "Knowledge base has been reset.", "status": "success"})
 
-# Common responses for predefined queries
 @app.route('/predefined', methods=['POST'])
 def predefined():
     """Handle predefined responses."""
     data = request.json
-    query = data.get('message', '')
+    query = data.get('message', '').strip()
     request_id = id(request)
     logger.info(f"Request {request_id}: Predefined query received: {query}")
     
-    predefined_responses = {
-        "Contact Sales": "You can contact our sales team at sales@baashyam.com or call us at +91-44-2345-6789.",
-        "About Baashyam": "Baashyaam Group, established over three decades ago, is a prominent real estate developer based in Chennai, Tamil Nadu. The company has a diverse portfolio that includes affordable housing, independent villas, premium living spaces, luxury residences, townships, and commercial buildings.",
-        "Contact us": "You can reach us at info@baashyam.com or visit our office at 123 Anna Salai, Chennai, Tamil Nadu. Our customer service number is +91-44-2345-6789.",
-        "Projects": "Baashyaam Group has several ongoing projects in Chennai including Baashyaam Pinnacle, Baashyaam Harmony, and Baashyaam Towers. Our projects range from affordable housing to luxury apartments.",
-        "Offers": "We currently have special festive season offers including 5% discount on booking amount and free modular kitchen for selected properties. Contact our sales team for more details."
-    }
+    # Convert to lowercase for case-insensitive matching
+    query_lower = query.lower()
     
-    response = predefined_responses.get(query, "I don't have a predefined answer for that query. Please ask something else.")
-    logger.info(f"Request {request_id}: Returned predefined response for '{query}'")
-    return jsonify({"response": response, "status": "success"})
-
-# Add a new route to check application health and debug CSV loading
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Check if the application is running and the vector store is loaded."""
-    global vector_store
-    vector_store_status = "loaded" if vector_store is not None else "not_loaded"
+    for key, response in PREDEFINED_RESPONSES.items():
+        if key in query_lower or query_lower in key:
+            logger.info(f"Request {request_id}: Matched predefined response for '{key}'")
+            return jsonify({"response": response, "status": "success"})
     
-    # Additional diagnostic information
-    csv_exists = os.path.exists(CSV_PATH)
-    csv_size = os.path.getsize(CSV_PATH) if csv_exists else 0
-    csv_info = {
-        "path": CSV_PATH,
-        "exists": csv_exists,
-        "size_bytes": csv_size
-    }
-    
-    # Test API key (limited check)
-    api_status = "valid"
-    available_models = []
-    try:
-        models = genai.list_models()
-        available_models = [model.name for model in models]
-    except Exception as e:
-        api_status = f"error: {str(e)}"
-    
-    logger.info(f"Health check: Application is running, vector store is {vector_store_status}")
+    # If no match found
+    logger.info(f"Request {request_id}: No predefined response match for '{query}'")
     return jsonify({
-        "status": "healthy",
-        "vector_store": vector_store_status,
-        "csv": csv_info,
-        "api_key": api_status,
-        "models": {
-            "embedding": EMBEDDING_MODEL,
-            "chat": CHAT_MODEL,
-            "available_models": available_models
-        }
+        "response": "I don't have a predefined answer for that query. Please ask something else.",
+        "status": "not_found"
     })
-
-# New debug endpoint to test CSV loading directly
-@app.route('/debug/load-csv', methods=['GET'])
-def debug_load_csv():
-    """Attempt to load CSV and return diagnostic information."""
-    try:
-        # Check file existence
-        csv_exists = os.path.exists(CSV_PATH)
-        if not csv_exists:
-            return jsonify({
-                "status": "error",
-                "message": f"CSV file not found at {CSV_PATH}",
-                "data_dir_exists": os.path.exists(DATA_DIR),
-                "available_files": os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else []
-            })
-            
-        # Try loading with pandas
-        try:
-            df = pd.read_csv(CSV_PATH, encoding='utf-8')
-        except UnicodeDecodeError:
-            df = pd.read_csv(CSV_PATH, encoding='latin-1')
-        
-        return jsonify({
-            "status": "success",
-            "message": "CSV loaded successfully",
-            "rows": len(df),
-            "columns": df.columns.tolist(),
-            "preview": df.head(3).to_dict(orient="records")
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": f"Error loading CSV: {str(e)}",
-            "traceback": traceback.format_exc()
-        })
 
 if __name__ == '__main__':
     try:
